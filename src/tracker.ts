@@ -1,7 +1,7 @@
 import '@whiskeysockets/baileys';
 import { WASocket, proto } from '@whiskeysockets/baileys';
 import { config } from './config';
-import { RttAnalyzer, StateAnalysisResult } from './services/rttAnalyzer';
+import { RttAnalyzer, StateAnalysisResult, ActivityState, NetworkType, ConfidenceLevel } from './services/rttAnalyzer';
 
 /**
  * Logger utility for debug and normal mode
@@ -31,20 +31,61 @@ class TrackerLogger {
         console.error(...args);
     }
 
-    formatDeviceState(jid: string, rtt: number, avgRtt: number, median: number, threshold: number, state: string) {
-        const stateColor = state === 'Online' ? '🟢' : state === 'Standby' ? '🟡' : state === 'OFFLINE' ? '🔴' : '⚪';
+    formatDeviceState(
+        jid: string, 
+        rtt: number, 
+        analysis: StateAnalysisResult
+    ) {
+        const stateColor = analysis.activityState === 'Online' ? '🟢' : 
+                          analysis.activityState === 'Standby' ? '🟡' : 
+                          analysis.activityState === 'Offline' ? '🔴' : '⚪';
+        const networkIcon = analysis.networkType === 'Wi-Fi' ? '📶' : 
+                           analysis.networkType === 'LTE' ? '📱' : '❓';
+        const confidenceIcon = analysis.confidenceLevel === 'High' ? '✓' : 
+                               analysis.confidenceLevel === 'Medium' ? '~' : '?';
         const timestamp = new Date().toLocaleTimeString('en-US');
+        const statusText = `${analysis.activityState} / ${analysis.networkType}`;
+        const confidenceText = `${analysis.confidenceLevel} (${analysis.observedTransitions} transitions)`;
 
         console.log(`\n╔════════════════════════════════════════════════════════════════╗`);
-        console.log(`║ ${stateColor} Device Status Update - ${timestamp}                 ║`);
+        console.log(`║ ${stateColor} ${networkIcon} Device Status Update - ${timestamp}              ║`);
         console.log(`╠════════════════════════════════════════════════════════════════╣`);
-        console.log(`║ JID:        ${jid.padEnd(48)} ║`);
-        console.log(`║ Status:     ${state.padEnd(48)} ║`);
-        console.log(`║ RTT:        ${rtt}ms${' '.repeat(48 - (rtt.toString().length + 2))}║`);
-        console.log(`║ Avg (3):    ${avgRtt.toFixed(0)}ms${' '.repeat(48 - (avgRtt.toFixed(0).length + 2))}║`);
-        console.log(`║ Median:     ${median.toFixed(0)}ms${' '.repeat(48 - (median.toFixed(0).length + 2))}║`);
-        console.log(`║ Threshold:  ${threshold.toFixed(0)}ms${' '.repeat(48 - (threshold.toFixed(0).length + 2))}║`);
+        console.log(`║ JID:           ${jid.padEnd(45)} ║`);
+        console.log(`║ Status:        ${statusText.padEnd(45)} ║`);
+        console.log(`║ Confidence:    ${confidenceIcon} ${confidenceText.padEnd(43)} ║`);
+        console.log(`║ RTT:           ${rtt}ms${' '.repeat(45 - (rtt.toString().length + 2))}║`);
+        
+        // Show pending state changes (decoupled activity and network)
+        if (analysis.activityPending || analysis.networkPending) {
+            console.log(`╠────────────────────────────────────────────────────────────────╣`);
+            if (analysis.activityPending) {
+                const activityBar = this.createProgressBar(analysis.activityProgress);
+                console.log(`║ ⏳ Activity:   ${analysis.rawActivityState} ${activityBar} ${analysis.activityProgress.toFixed(0)}%${' '.repeat(Math.max(0, 19 - analysis.activityProgress.toFixed(0).length))}║`);
+            }
+            if (analysis.networkPending) {
+                const networkBar = this.createProgressBar(analysis.networkProgress);
+                console.log(`║ ⏳ Network:    ${analysis.rawNetworkType} ${networkBar} ${analysis.networkProgress.toFixed(0)}%${' '.repeat(Math.max(0, 21 - analysis.networkProgress.toFixed(0).length))}║`);
+            }
+        }
+        
+        console.log(`╠────────────────────────────────────────────────────────────────╣`);
+        console.log(`║ Window Median: ${analysis.windowMedian.toFixed(0)}ms${' '.repeat(45 - (analysis.windowMedian.toFixed(0).length + 2))}║`);
+        console.log(`║ Window Jitter: ${analysis.windowJitter.toFixed(0)}ms (IQR)${' '.repeat(38 - (analysis.windowJitter.toFixed(0).length + 2))}║`);
+        console.log(`╠────────────────────────────────────────────────────────────────╣`);
+        const thresholdLabel = analysis.confidenceLevel === 'Low' ? 'Fixed' : `P${config.magnitudePercentile}`;
+        console.log(`║ μ Threshold:   ${analysis.magnitudeThreshold.toFixed(0)}ms (${thresholdLabel})${' '.repeat(Math.max(0, 39 - analysis.magnitudeThreshold.toFixed(0).length - thresholdLabel.length))}║`);
+        console.log(`║ σ Threshold:   ${analysis.jitterThreshold.toFixed(0)}ms (P${config.jitterPercentile})${' '.repeat(36 - (analysis.jitterThreshold.toFixed(0).length + 2))}║`);
         console.log(`╚════════════════════════════════════════════════════════════════╝\n`);
+    }
+
+    /**
+     * Create a simple progress bar for state confirmation
+     */
+    private createProgressBar(progress: number): string {
+        const totalWidth = 15;
+        const filledWidth = Math.round((progress / 100) * totalWidth);
+        const emptyWidth = totalWidth - filledWidth;
+        return '[' + '█'.repeat(filledWidth) + '░'.repeat(emptyWidth) + ']';
     }
 }
 
@@ -54,12 +95,14 @@ const trackerLogger = new TrackerLogger();
  * Metrics tracked per device for activity monitoring
  */
 interface DeviceMetrics {
-    rttHistory: number[];      // Historical RTT measurements (up to deviceHistoryLimit)
-    recentRtts: number[];      // Recent RTTs for moving average (last recentRttCount)
-    state: string;             // Current device state (Online/Standby/Calibrating/OFFLINE)
-    lastRtt: number;           // Most recent RTT measurement
-    lastUpdate: number;        // Timestamp of last update
+    rttHistory: number[];        // Historical RTT measurements (up to deviceHistoryLimit)
+    activityState: ActivityState; // Current activity state (Online/Standby/Calibrating/Offline)
+    networkType: NetworkType;    // Inferred network type (Wi-Fi/LTE/Unknown)
+    lastRtt: number;             // Most recent RTT measurement
+    lastUpdate: number;          // Timestamp of last update
     consecutiveTimeouts: number; // Track consecutive timeouts for offline detection
+    // Last analysis result for display
+    lastAnalysis: StateAnalysisResult | null;
 }
 
 /**
@@ -158,8 +201,13 @@ export class WhatsAppTracker {
                 devices: [],
                 deviceCount: this.trackedJids.size,
                 presence: this.lastPresence,
-                median: 0,
-                threshold: 0
+                magnitudeThreshold: config.fixedMagnitudeThreshold,
+                jitterThreshold: 0,
+                windowSize: 0,
+                historySize: 0,
+                discardedSamples: 0,
+                confidenceLevel: 'Low',
+                observedTransitions: 0
             });
         }
 
@@ -300,11 +348,12 @@ export class WhatsAppTracker {
         if (!this.deviceMetrics.has(jid)) {
             this.deviceMetrics.set(jid, {
                 rttHistory: [],
-                recentRtts: [],
-                state: 'Calibrating...',
+                activityState: 'Calibrating',
+                networkType: 'Unknown',
                 lastRtt: timeout,
                 lastUpdate: Date.now(),
-                consecutiveTimeouts: 1
+                consecutiveTimeouts: 1,
+                lastAnalysis: null
             });
         } else {
             const metrics = this.deviceMetrics.get(jid)!;
@@ -312,11 +361,12 @@ export class WhatsAppTracker {
             metrics.lastRtt = timeout;
             metrics.lastUpdate = Date.now();
 
-            // Only mark as OFFLINE after multiple consecutive timeouts
+            // Only mark as Offline after multiple consecutive timeouts
             // This prevents false positives from network hiccups
             if (metrics.consecutiveTimeouts >= 3) {
-                metrics.state = 'OFFLINE';
-                trackerLogger.info(`\n🔴 Device ${jid} marked as OFFLINE (${metrics.consecutiveTimeouts} consecutive timeouts)\n`);
+                metrics.activityState = 'Offline';
+                metrics.networkType = 'Unknown';
+                trackerLogger.info(`\n🔴 Device ${jid} marked as Offline (${metrics.consecutiveTimeouts} consecutive timeouts)\n`);
             } else {
                 trackerLogger.debug(`[DEVICE ${jid}] Timeout ${metrics.consecutiveTimeouts}/3 - not marking offline yet`);
             }
@@ -335,11 +385,12 @@ export class WhatsAppTracker {
         if (!this.deviceMetrics.has(jid)) {
             this.deviceMetrics.set(jid, {
                 rttHistory: [],
-                recentRtts: [],
-                state: 'Calibrating...',
+                activityState: 'Calibrating',
+                networkType: 'Unknown',
                 lastRtt: rtt,
                 lastUpdate: Date.now(),
-                consecutiveTimeouts: 0
+                consecutiveTimeouts: 0,
+                lastAnalysis: null
             });
         }
 
@@ -350,19 +401,13 @@ export class WhatsAppTracker {
 
         // Only process measurements within reasonable range
         if (rtt <= config.offlineThreshold) {
-            // 1. Add to device's recent RTTs for moving average
-            metrics.recentRtts.push(rtt);
-            if (metrics.recentRtts.length > config.recentRttCount) {
-                metrics.recentRtts.shift();
-            }
-
-            // 2. Add to device's history for calibration
+            // 1. Add to device's history for calibration
             metrics.rttHistory.push(rtt);
             if (metrics.rttHistory.length > config.deviceHistoryLimit) {
                 metrics.rttHistory.shift();
             }
 
-            // 3. Add to global RTT analyzer
+            // 2. Add to global RTT analyzer (builds sliding window)
             this.rttAnalyzer.addMeasurement(rtt);
 
             metrics.lastRtt = rtt;
@@ -373,7 +418,8 @@ export class WhatsAppTracker {
         } else {
             // High RTT but got a response - device is slow but not offline
             trackerLogger.debug(`[DEVICE ${jid}] High RTT (${rtt}ms) but device responded - marking as Standby`);
-            metrics.state = 'Standby';
+            metrics.activityState = 'Standby';
+            metrics.networkType = 'Unknown'; // Can't determine network type without proper analysis
             metrics.lastRtt = rtt;
             metrics.lastUpdate = Date.now();
         }
@@ -382,62 +428,76 @@ export class WhatsAppTracker {
     }
 
     /**
-     * Determine device state (Online/Standby/OFFLINE) based on RTT analysis
-     * Uses the centralized RttAnalyzer for efficient cached calculations
+     * Determine device state using two-dimensional statistical analysis
+     * - Activity state (Online/Standby) based on RTT magnitude (μ)
+     * - Network type (Wi-Fi/LTE) based on RTT jitter (σ)
      * @param jid Device JID
      */
     private determineDeviceState(jid: string) {
         const metrics = this.deviceMetrics.get(jid);
         if (!metrics) return;
 
-        // Use the RTT analyzer to determine state
+        // Use the RTT analyzer to determine state with two-dimensional model
         const analysis: StateAnalysisResult = this.rttAnalyzer.determineState(
-            metrics.recentRtts,
-            metrics.lastRtt,
-            metrics.state
+            metrics.activityState,
+            false // Not a timeout
         );
 
-        metrics.state = analysis.state;
+        // Update device metrics with analysis results
+        metrics.activityState = analysis.activityState;
+        metrics.networkType = analysis.networkType;
+        metrics.lastAnalysis = analysis;
 
         // Normal mode: Formatted output
-        trackerLogger.formatDeviceState(
-            jid,
-            metrics.lastRtt,
-            analysis.movingAvg,
-            analysis.median,
-            analysis.threshold,
-            metrics.state
-        );
+        trackerLogger.formatDeviceState(jid, metrics.lastRtt, analysis);
 
         // Debug mode: Additional debug information
-        trackerLogger.debug(`[DEBUG] RTT History length: ${metrics.rttHistory.length}, Global History: ${this.rttAnalyzer.getHistorySize()}`);
+        trackerLogger.debug(`[DEBUG] Window size: ${this.rttAnalyzer.getWindowSize()}, History size: ${this.rttAnalyzer.getHistorySize()}`);
     }
 
     /**
      * Send update to client with current tracking data
      */
     private sendUpdate() {
-        // Build devices array
+        // Build devices array with new state model (decoupled confirmation)
         const devices = Array.from(this.deviceMetrics.entries()).map(([jid, metrics]) => ({
             jid,
-            state: metrics.state,
+            activityState: metrics.activityState,
+            networkType: metrics.networkType,
             rtt: metrics.lastRtt,
-            avg: metrics.recentRtts.length > 0
-                ? metrics.recentRtts.reduce((a: number, b: number) => a + b, 0) / metrics.recentRtts.length
-                : 0
+            // Include analysis metrics if available
+            windowMedian: metrics.lastAnalysis?.windowMedian ?? 0,
+            windowJitter: metrics.lastAnalysis?.windowJitter ?? 0,
+            // Include raw states
+            rawActivityState: metrics.lastAnalysis?.rawActivityState ?? metrics.activityState,
+            rawNetworkType: metrics.lastAnalysis?.rawNetworkType ?? metrics.networkType,
+            // Decoupled pending state info
+            activityPending: metrics.lastAnalysis?.activityPending ?? false,
+            activityProgress: metrics.lastAnalysis?.activityProgress ?? 0,
+            networkPending: metrics.lastAnalysis?.networkPending ?? false,
+            networkProgress: metrics.lastAnalysis?.networkProgress ?? 0,
+            // Include confidence info
+            confidenceLevel: metrics.lastAnalysis?.confidenceLevel ?? 'Low',
+            observedTransitions: metrics.lastAnalysis?.observedTransitions ?? 0
         }));
 
-        // Get global stats from analyzer
-        const globalMedian = this.rttAnalyzer.getCachedMedian() || this.rttAnalyzer.calculateMedian();
-        const globalThreshold = this.rttAnalyzer.getCachedThreshold() || this.rttAnalyzer.calculateThreshold();
+        // Get global thresholds from analyzer
+        const magnitudeThreshold = this.rttAnalyzer.getEffectiveThreshold();
+        const jitterThreshold = this.rttAnalyzer.getJitterThreshold();
 
         const data = {
             devices,
             deviceCount: this.trackedJids.size,
             presence: this.lastPresence,
-            // Global stats for charts
-            median: globalMedian,
-            threshold: globalThreshold
+            // Global stats for charts (new model)
+            magnitudeThreshold,
+            jitterThreshold,
+            windowSize: this.rttAnalyzer.getWindowSize(),
+            historySize: this.rttAnalyzer.getHistorySize(),
+            discardedSamples: this.rttAnalyzer.getDiscardedCount(),
+            // Confidence info
+            confidenceLevel: this.rttAnalyzer.getConfidenceLevel(),
+            observedTransitions: this.rttAnalyzer.getObservedTransitions()
         };
 
         if (this.onUpdate) {

@@ -3,20 +3,33 @@ import {Eye, EyeOff, Plus} from 'lucide-react';
 import { socket } from '../App';
 import { ContactCard } from './ContactCard';
 
+/** Activity states based on RTT magnitude */
+type ActivityState = 'Online' | 'Standby' | 'Offline' | 'Calibrating';
+
+/** Network type inferred from RTT jitter */
+type NetworkType = 'Wi-Fi' | 'LTE' | 'Unknown';
+
+/** Confidence level for activity classification */
+type ConfidenceLevel = 'Low' | 'Medium' | 'High';
+
 interface TrackerData {
     rtt: number;
-    avg: number;
-    median: number;
-    threshold: number;
-    state: string;
+    windowMedian: number;
+    windowJitter: number;
+    magnitudeThreshold: number;
+    jitterThreshold: number;
+    activityState: ActivityState;
+    networkType: NetworkType;
     timestamp: number;
 }
 
 interface DeviceInfo {
     jid: string;
-    state: string;
+    activityState: ActivityState;
+    networkType: NetworkType;
     rtt: number;
-    avg: number;
+    windowMedian: number;
+    windowJitter: number;
 }
 
 interface ContactInfo {
@@ -28,6 +41,8 @@ interface ContactInfo {
     deviceCount: number;
     presence: string | null;
     profilePic: string | null;
+    confidenceLevel: ConfidenceLevel;
+    observedTransitions: number;
 }
 
 export function Dashboard() {
@@ -58,15 +73,24 @@ export function Dashboard() {
                     if (data.devices !== undefined) {
                         updatedContact.devices = data.devices;
                     }
+                    if (data.confidenceLevel !== undefined) {
+                        updatedContact.confidenceLevel = data.confidenceLevel;
+                    }
+                    if (data.observedTransitions !== undefined) {
+                        updatedContact.observedTransitions = data.observedTransitions;
+                    }
 
-                    // Add to chart data
-                    if (data.median !== undefined && data.devices && data.devices.length > 0) {
+                    // Add to chart data (new two-dimensional model)
+                    if (data.devices && data.devices.length > 0) {
+                        const primaryDevice = data.devices[0];
                         const newDataPoint: TrackerData = {
-                            rtt: data.devices[0].rtt,
-                            avg: data.devices[0].avg,
-                            median: data.median,
-                            threshold: data.threshold,
-                            state: data.devices.find((d: DeviceInfo) => d.state.includes('Online'))?.state || data.devices[0].state,
+                            rtt: primaryDevice.rtt,
+                            windowMedian: primaryDevice.windowMedian || 0,
+                            windowJitter: primaryDevice.windowJitter || 0,
+                            magnitudeThreshold: data.magnitudeThreshold || 0,
+                            jitterThreshold: data.jitterThreshold || 0,
+                            activityState: primaryDevice.activityState || 'Calibrating',
+                            networkType: primaryDevice.networkType || 'Unknown',
                             timestamp: Date.now(),
                         };
                         updatedContact.data = [...updatedContact.data, newDataPoint];
@@ -112,7 +136,9 @@ export function Dashboard() {
                     devices: [],
                     deviceCount: 0,
                     presence: null,
-                    profilePic: null
+                    profilePic: null,
+                    confidenceLevel: 'Low',
+                    observedTransitions: 0
                 });
                 return next;
             });
@@ -225,6 +251,8 @@ export function Dashboard() {
                             profilePic={contact.profilePic}
                             onRemove={() => handleRemove(contact.jid)}
                             privacyMode={privacyMode}
+                            confidenceLevel={contact.confidenceLevel}
+                            observedTransitions={contact.observedTransitions}
                         />
                     ))}
                 </div>
