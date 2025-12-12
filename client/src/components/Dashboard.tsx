@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import {Eye, EyeOff, Plus} from 'lucide-react';
+import {Eye, EyeOff, Plus, Trash2, Zap} from 'lucide-react';
 import { socket } from '../App';
 import { ContactCard } from './ContactCard';
+
+type ProbeMethod = 'delete' | 'reaction';
 
 interface TrackerData {
     rtt: number;
@@ -35,6 +37,7 @@ export function Dashboard() {
     const [contacts, setContacts] = useState<Map<string, ContactInfo>>(new Map());
     const [error, setError] = useState<string | null>(null);
     const [privacyMode, setPrivacyMode] = useState(false);
+    const [probeMethod, setProbeMethod] = useState<ProbeMethod>('delete');
 
     useEffect(() => {
         function onTrackerUpdate(update: any) {
@@ -132,12 +135,17 @@ export function Dashboard() {
             setTimeout(() => setError(null), 3000);
         }
 
+        function onProbeMethod(method: ProbeMethod) {
+            setProbeMethod(method);
+        }
+
         socket.on('tracker-update', onTrackerUpdate);
         socket.on('profile-pic', onProfilePic);
         socket.on('contact-name', onContactName);
         socket.on('contact-added', onContactAdded);
         socket.on('contact-removed', onContactRemoved);
         socket.on('error', onError);
+        socket.on('probe-method', onProbeMethod);
 
         return () => {
             socket.off('tracker-update', onTrackerUpdate);
@@ -146,6 +154,7 @@ export function Dashboard() {
             socket.off('contact-added', onContactAdded);
             socket.off('contact-removed', onContactRemoved);
             socket.off('error', onError);
+            socket.off('probe-method', onProbeMethod);
         };
     }, []);
 
@@ -158,33 +167,70 @@ export function Dashboard() {
         socket.emit('remove-contact', jid);
     };
 
+    const handleProbeMethodChange = (method: ProbeMethod) => {
+        socket.emit('set-probe-method', method);
+    };
+
     return (
         <div className="space-y-6">
             {/* Add Contact Form */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
                 <div className="flex justify-between items-center mb-4">
                     <h2 className="text-xl font-semibold text-gray-900">Track Contacts</h2>
-                    <button
-                        onClick={() => setPrivacyMode(!privacyMode)}
-                        className={`px-4 py-2 rounded-lg flex items-center gap-2 font-medium transition-all duration-200 ${
-                            privacyMode 
-                                ? 'bg-green-600 text-white hover:bg-green-700 shadow-md' 
-                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                        }`}
-                        title={privacyMode ? 'Privacy Mode: ON (Click to disable)' : 'Privacy Mode: OFF (Click to enable)'}
-                    >
-                        {privacyMode ? (
-                            <>
-                                <EyeOff size={20} />
-                                <span>Privacy ON</span>
-                            </>
-                        ) : (
-                            <>
-                                <Eye size={20} />
-                                <span>Privacy OFF</span>
-                            </>
-                        )}
-                    </button>
+                    <div className="flex items-center gap-4">
+                        {/* Probe Method Toggle */}
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Probe Method:</span>
+                            <div className="flex rounded-lg overflow-hidden border border-gray-300">
+                                <button
+                                    onClick={() => handleProbeMethodChange('delete')}
+                                    className={`px-3 py-1.5 text-sm font-medium transition-all duration-200 flex items-center gap-1 ${
+                                        probeMethod === 'delete'
+                                            ? 'bg-purple-600 text-white'
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                                    title="Silent Delete Probe - Completely covert, target sees nothing"
+                                >
+                                    <Trash2 size={14} />
+                                    Delete
+                                </button>
+                                <button
+                                    onClick={() => handleProbeMethodChange('reaction')}
+                                    className={`px-3 py-1.5 text-sm font-medium transition-all duration-200 flex items-center gap-1 ${
+                                        probeMethod === 'reaction'
+                                            ? 'bg-yellow-500 text-white'
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                                    title="Reaction Probe - Sends reactions to non-existent messages"
+                                >
+                                    <Zap size={14} />
+                                    Reaction
+                                </button>
+                            </div>
+                        </div>
+                        {/* Privacy Mode Toggle */}
+                        <button
+                            onClick={() => setPrivacyMode(!privacyMode)}
+                            className={`px-4 py-2 rounded-lg flex items-center gap-2 font-medium transition-all duration-200 ${
+                                privacyMode 
+                                    ? 'bg-green-600 text-white hover:bg-green-700 shadow-md' 
+                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                            }`}
+                            title={privacyMode ? 'Privacy Mode: ON (Click to disable)' : 'Privacy Mode: OFF (Click to enable)'}
+                        >
+                            {privacyMode ? (
+                                <>
+                                    <EyeOff size={20} />
+                                    <span>Privacy ON</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Eye size={20} />
+                                    <span>Privacy OFF</span>
+                                </>
+                            )}
+                        </button>
+                    </div>
                 </div>
                 <div className="flex gap-4">
                     <input

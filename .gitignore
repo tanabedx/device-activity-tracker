@@ -78,3 +78,4 @@ jspm_packages/
 # Misc
 .cache
 .parcel-cache
+package-lock.json

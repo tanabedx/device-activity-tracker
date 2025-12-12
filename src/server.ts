@@ -14,7 +14,7 @@ import cors from 'cors';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { Boom } from '@hapi/boom';
-import { WhatsAppTracker } from './tracker';
+import { WhatsAppTracker, ProbeMethod } from './tracker';
 
 const app = express();
 app.use(cors());
@@ -29,6 +29,7 @@ const io = new Server(httpServer, {
 
 let sock: any;
 let isWhatsAppConnected = false;
+let globalProbeMethod: ProbeMethod = 'delete'; // Default to delete method
 const trackers: Map<string, WhatsAppTracker> = new Map(); // JID -> Tracker instance
 
 async function connectToWhatsApp() {
@@ -85,6 +86,9 @@ io.on('connection', (socket) => {
         socket.emit('connection-open');
     }
 
+    // Send current probe method to client
+    socket.emit('probe-method', globalProbeMethod);
+
     socket.emit('tracked-contacts', Array.from(trackers.keys()));
 
     socket.on('add-contact', async (number: string) => {
@@ -103,6 +107,7 @@ io.on('connection', (socket) => {
 
             if (result?.exists) {
                 const tracker = new WhatsAppTracker(sock, result.jid);
+                tracker.setProbeMethod(globalProbeMethod); // Use current global method
                 trackers.set(result.jid, tracker);
 
                 tracker.onUpdate = (data) => {
@@ -147,6 +152,23 @@ io.on('connection', (socket) => {
             trackers.delete(jid);
             socket.emit('contact-removed', jid);
         }
+    });
+
+    socket.on('set-probe-method', (method: ProbeMethod) => {
+        console.log(`Request to change probe method to: ${method}`);
+        if (method !== 'delete' && method !== 'reaction') {
+            socket.emit('error', { message: 'Invalid probe method' });
+            return;
+        }
+
+        globalProbeMethod = method;
+
+        for (const tracker of trackers.values()) {
+            tracker.setProbeMethod(method);
+        }
+
+        io.emit('probe-method', method);
+        console.log(`Probe method changed to: ${method}`);
     });
 });
 
