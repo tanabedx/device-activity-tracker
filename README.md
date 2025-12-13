@@ -66,7 +66,66 @@ Follow prompts to authenticate and enter target number.
 
 ## How It Works
 
-The tracker sends reaction messages to non-existent message IDs, which triggers no notifications at the target. The time between sending the probe message and receiving the CLIENT ACK (Status 3) is measured as RTT. Device state is detected using a dynamic threshold calculated as 90% of the median RTT: values below the threshold indicate active usage, values above indicate standby mode. Measurements are stored in a history and the median is continuously updated to adapt to different network conditions.
+The tracker sends reaction messages to non-existent message IDs, which triggers no notifications at the target. The time between sending the probe message and receiving the CLIENT ACK (Status 3) is measured as RTT.
+
+### Statistical Analysis Model
+
+The system uses a **two-dimensional statistical model** to classify device state:
+
+#### Dimension 1: Activity State (RTT Magnitude)
+- **Metric:** Window Median (μ) - median RTT over a sliding window of 20 samples
+- **Classification:**
+  - `Online` - RTT below adaptive threshold (device actively in use)
+  - `Standby` - RTT above adaptive threshold (device idle/locked)
+  - `Offline` - No response received (timeout)
+  - `Calibrating` - Collecting initial samples
+
+#### Dimension 2: Network Type (RTT Jitter)
+- **Metric:** Window Jitter (σ) - Interquartile Range (IQR) of RTT in the window
+- **Classification:**
+  - `Wi-Fi` - Low jitter (stable connection)
+  - `LTE` - High jitter (variable mobile connection)
+
+#### Adaptive Thresholds
+
+Thresholds are calculated dynamically using the **75th percentile (P75)** of historical measurements:
+
+```
+μ Threshold = P75 of historical median values
+σ Threshold = P75 of historical jitter values
+```
+
+This allows the system to adapt to different network conditions and baseline RTT values.
+
+#### Confidence System
+
+The system uses a **three-tier confidence model** to prevent misclassification during early tracking:
+
+| Confidence | Transitions Observed | Threshold Used |
+|------------|---------------------|----------------|
+| Low        | 0-1                 | Fixed (1000ms) |
+| Medium     | 2-3                 | Adaptive P75   |
+| High       | 4+                  | Adaptive P75   |
+
+A **transition** is detected when the window median changes by more than 40% between consecutive windows.
+
+#### State Confirmation
+
+To prevent flickering between states, changes require **confirmation**:
+- 3 consecutive window calculations in the new state
+- Minimum 5 seconds persistence
+
+Activity state and network type are confirmed **independently**.
+
+#### Outlier Filtering
+
+The frontend applies **conservative outlier filtering** to prevent Y-axis skewing:
+
+1. **Threshold:** RTT must exceed **3x the median** AND be above **5000ms minimum**
+2. **Isolation check:** Only isolated spikes (1-2 consecutive) are filtered; sustained high RTT (3+ consecutive) is kept as it indicates real network degradation
+3. **Requires 20+ samples** before outlier detection activates
+
+This ensures only truly extreme random spikes are filtered, not legitimate network events.
 
 ## Project Structure
 
