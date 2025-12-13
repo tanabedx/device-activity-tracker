@@ -54,3 +54,7 @@ export function createWhatsAppJid(cleanedNumber: string): string {
     return `${cleanedNumber}@s.whatsapp.net`;
 }
 
+
+
+
+
