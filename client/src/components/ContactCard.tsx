@@ -1,6 +1,6 @@
-import React, { useMemo, useState, useRef, useEffect } from 'react';
-import { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Brush } from 'recharts';
-import { Square, Activity, Wifi, Smartphone, Monitor, Clock, Maximize2, Shield } from 'lucide-react';
+import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
+import { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Square, Activity, Wifi, Smartphone, Monitor, Clock, Maximize2, Shield, ZoomIn } from 'lucide-react';
 import clsx from 'clsx';
 
 // Maximum visible data points in chart for performance optimization
@@ -80,8 +80,13 @@ export function ContactCard({
 
     // Chart view mode: 'lastHour' or 'all'
     const [chartViewMode, setChartViewMode] = useState<'lastHour' | 'all'>('lastHour');
-    // Store brush range to maintain position when new data arrives
-    const brushRangeRef = useRef<{ startIndex?: number; endIndex?: number } | null>(null);
+    
+    // Zoom/pan state - stores time domain
+    const [zoomDomain, setZoomDomain] = useState<{ start: number; end: number } | null>(null);
+    const chartContainerRef = useRef<HTMLDivElement>(null);
+    const isDragging = useRef(false);
+    const dragStartX = useRef(0);
+    const dragStartDomain = useRef<{ start: number; end: number } | null>(null);
     const prevDataLengthRef = useRef<number>(0);
 
     /**
@@ -133,8 +138,11 @@ export function ContactCard({
             const typicalMedian = getPercentile(rttSorted, 50);
             
             // An outlier must be > 3x the typical median (truly extreme)
-            // This prevents flagging normal network variations
-            const extremeThreshold = Math.max(typicalMedian * 3, 5000); // At least 5000ms
+            // Use Q3 + 3*IQR method for robust outlier detection
+            const q1 = getPercentile(rttSorted, 25);
+            const q3 = getPercentile(rttSorted, 75);
+            const iqr = q3 - q1;
+            const extremeThreshold = Math.max(q3 + 3 * iqr, typicalMedian * 2.5); // IQR method or 2.5x median
             
             // First pass: mark truly extreme readings
             const isExtreme = nonCalibrationData.map(d => {
@@ -176,14 +184,6 @@ export function ContactCard({
             }
         }
         
-        // Adjust brush indices when new data is added
-        if (chartViewMode === 'all' && brushRangeRef.current && prevDataLengthRef.current > 0) {
-            const dataDiff = cleanedData.length - prevDataLengthRef.current;
-            if (dataDiff > 0 && brushRangeRef.current.startIndex !== undefined && brushRangeRef.current.endIndex !== undefined) {
-                brushRangeRef.current.startIndex = Math.max(0, brushRangeRef.current.startIndex + dataDiff);
-                brushRangeRef.current.endIndex = Math.min(cleanedData.length - 1, brushRangeRef.current.endIndex + dataDiff);
-            }
-        }
         prevDataLengthRef.current = cleanedData.length;
         
         return {
@@ -201,13 +201,134 @@ export function ContactCard({
         };
     }, [data, chartViewMode]);
     
-    // Reset brush when switching view modes
+    // Reset zoom when switching view modes
     useEffect(() => {
-        if (chartViewMode === 'lastHour') {
-            brushRangeRef.current = null;
-            prevDataLengthRef.current = 0;
-        }
+        setZoomDomain(null);
+        prevDataLengthRef.current = 0;
     }, [chartViewMode]);
+
+    // Get data time range for zoom calculations
+    const dataTimeRange = useMemo(() => {
+        if (chartData.length === 0) return null;
+        const timestamps = chartData.map(d => d.timestamp).filter(t => t);
+        return {
+            min: Math.min(...timestamps),
+            max: Math.max(...timestamps)
+        };
+    }, [chartData]);
+    
+    // Refs to hold current values for wheel handler (avoids closure issues)
+    const dataTimeRangeRef = useRef(dataTimeRange);
+    const zoomDomainRef = useRef(zoomDomain);
+    const chartDataLengthRef = useRef(chartData.length);
+    
+    useEffect(() => { dataTimeRangeRef.current = dataTimeRange; }, [dataTimeRange]);
+    useEffect(() => { zoomDomainRef.current = zoomDomain; }, [zoomDomain]);
+    useEffect(() => { chartDataLengthRef.current = chartData.length; }, [chartData.length]);
+
+    // Attach wheel event listener with { passive: false } to enable preventDefault
+    useEffect(() => {
+        const container = chartContainerRef.current;
+        if (!container) return;
+
+        const wheelHandler = (e: WheelEvent) => {
+            const timeRange = dataTimeRangeRef.current;
+            const currentZoom = zoomDomainRef.current;
+            const dataLen = chartDataLengthRef.current;
+            
+            if (!timeRange || dataLen < 5) {
+                console.log('[Chart] Wheel ignored: timeRange=', timeRange, 'dataLen=', dataLen);
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            
+            console.log('[Chart] Wheel zoom triggered');
+            
+            const zoomFactor = e.deltaY > 0 ? 1.2 : 0.8;
+            const currentStart = currentZoom?.start ?? timeRange.min;
+            const currentEnd = currentZoom?.end ?? timeRange.max;
+            const range = currentEnd - currentStart;
+            const center = (currentStart + currentEnd) / 2;
+            const newRange = Math.min(
+                Math.max(range * zoomFactor, 60000),
+                timeRange.max - timeRange.min
+            );
+            
+            let newStart = center - newRange / 2;
+            let newEnd = center + newRange / 2;
+            
+            if (newStart < timeRange.min) {
+                newStart = timeRange.min;
+                newEnd = Math.min(newStart + newRange, timeRange.max);
+            }
+            if (newEnd > timeRange.max) {
+                newEnd = timeRange.max;
+                newStart = Math.max(newEnd - newRange, timeRange.min);
+            }
+            
+            if (newRange >= timeRange.max - timeRange.min) {
+                setZoomDomain(null);
+            } else {
+                setZoomDomain({ start: newStart, end: newEnd });
+            }
+        };
+
+        container.addEventListener('wheel', wheelHandler, { passive: false });
+        return () => container.removeEventListener('wheel', wheelHandler);
+    }, []); // Empty deps - handler uses refs
+
+    // Handle mouse drag for pan
+    const handleMouseDown = useCallback((e: React.MouseEvent) => {
+        e.preventDefault(); // Prevent text selection
+        if (!zoomDomain) return;
+        isDragging.current = true;
+        dragStartX.current = e.clientX;
+        dragStartDomain.current = { ...zoomDomain };
+    }, [zoomDomain]);
+
+    const handleMouseMove = useCallback((e: React.MouseEvent) => {
+        if (!isDragging.current || !dragStartDomain.current || !dataTimeRange || !chartContainerRef.current) return;
+        
+        const containerWidth = chartContainerRef.current.offsetWidth;
+        const deltaX = e.clientX - dragStartX.current;
+        const range = dragStartDomain.current.end - dragStartDomain.current.start;
+        const timePerPixel = range / containerWidth;
+        const timeDelta = -deltaX * timePerPixel; // Negative because dragging right should go back in time
+        
+        let newStart = dragStartDomain.current.start + timeDelta;
+        let newEnd = dragStartDomain.current.end + timeDelta;
+        
+        // Clamp to data bounds
+        if (newStart < dataTimeRange.min) {
+            newStart = dataTimeRange.min;
+            newEnd = newStart + range;
+        }
+        if (newEnd > dataTimeRange.max) {
+            newEnd = dataTimeRange.max;
+            newStart = newEnd - range;
+        }
+        
+        setZoomDomain({ start: newStart, end: newEnd });
+    }, [dataTimeRange]);
+
+    const handleMouseUp = useCallback(() => {
+        isDragging.current = false;
+        dragStartDomain.current = null;
+    }, []);
+
+    // Reset zoom handler
+    const handleResetZoom = useCallback(() => {
+        setZoomDomain(null);
+    }, []);
+
+    // Calculate effective domain for XAxis
+    const effectiveDomain = useMemo(() => {
+        if (zoomDomain) {
+            return [zoomDomain.start, zoomDomain.end];
+        }
+        return ['dataMin', 'dataMax'];
+    }, [zoomDomain]);
 
     return (
         <div className="bg-gradient-to-br from-white to-gray-50 rounded-xl shadow-lg border border-gray-200 overflow-hidden">
@@ -387,7 +508,11 @@ export function ContactCard({
                                     )}
                                 </div>
                                 <button
-                                    onClick={() => setChartViewMode(chartViewMode === 'lastHour' ? 'all' : 'lastHour')}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        console.log('[ContactCard] Toggling view mode from', chartViewMode);
+                                        setChartViewMode(chartViewMode === 'lastHour' ? 'all' : 'lastHour');
+                                    }}
                                     className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                                     title={chartViewMode === 'lastHour' ? 'Show all data' : 'Show last hour'}
                                 >
@@ -403,8 +528,35 @@ export function ContactCard({
                                         </>
                                     )}
                                 </button>
+                                {zoomDomain && (
+                                    <button
+                                        onClick={handleResetZoom}
+                                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium bg-purple-100 text-purple-700 rounded-md hover:bg-purple-200 transition-colors"
+                                        title="Reset zoom to show all data"
+                                    >
+                                        <ZoomIn size={12} />
+                                        <span>Reset Zoom</span>
+                                    </button>
+                                )}
+                                <span className="text-xs text-gray-400 hidden sm:block">
+                                    Scroll to zoom • Drag to pan
+                                </span>
                             </div>
-                            <div style={{ width: '100%', height: '250px', minHeight: '200px' }}>
+                            <div 
+                                ref={chartContainerRef}
+                                style={{ 
+                                    width: '100%', 
+                                    height: '300px', 
+                                    minHeight: '250px', 
+                                    cursor: zoomDomain ? 'grab' : 'default',
+                                    userSelect: 'none',
+                                    WebkitUserSelect: 'none'
+                                }}
+                                onMouseDown={handleMouseDown}
+                                onMouseMove={handleMouseMove}
+                                onMouseUp={handleMouseUp}
+                                onMouseLeave={handleMouseUp}
+                            >
                                 {chartData.length > 0 ? (
                                     <ResponsiveContainer width="100%" height="100%">
                                         <ComposedChart 
@@ -413,7 +565,7 @@ export function ContactCard({
                                                 top: 5, 
                                                 right: 10, 
                                                 left: 0, 
-                                                bottom: chartViewMode === 'all' ? 80 : 20 
+                                                bottom: 30 
                                             }}
                                         >
                                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
@@ -421,19 +573,15 @@ export function ContactCard({
                                                 dataKey="timestamp" 
                                                 scale="time"
                                                 type="number"
-                                                domain={['dataMin', 'dataMax']}
+                                                domain={effectiveDomain as any}
+                                                allowDataOverflow={true}
                                                 tickFormatter={(value) => {
                                                     if (!value) return '';
                                                     const date = new Date(value);
-                                                    return chartViewMode === 'all' 
-                                                        ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                                                        : '';
+                                                    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                                                 }}
-                                                angle={chartViewMode === 'all' ? -45 : 0}
-                                                textAnchor={chartViewMode === 'all' ? 'end' : 'middle'}
-                                                height={chartViewMode === 'all' ? 60 : 0}
-                                                style={{ fontSize: '11px' }}
-                                                hide={chartViewMode === 'lastHour'}
+                                                style={{ fontSize: '10px' }}
+                                                tick={{ fill: '#6b7280' }}
                                             />
                                             <YAxis domain={['auto', 'auto']} />
                                             <Tooltip
@@ -483,27 +631,6 @@ export function ContactCard({
                                                 contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', padding: '12px' }}
                                                 labelStyle={{ fontWeight: 'bold', marginBottom: '8px', fontSize: '13px', color: '#374151' }}
                                             />
-                                            {chartViewMode === 'all' && chartData.length > 10 && (
-                                                <Brush 
-                                                    dataKey="timestamp"
-                                                    height={30}
-                                                    stroke="#8884d8"
-                                                    tickFormatter={(value) => {
-                                                        const date = new Date(value);
-                                                        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                                                    }}
-                                                    startIndex={brushRangeRef.current?.startIndex}
-                                                    endIndex={brushRangeRef.current?.endIndex !== undefined ? brushRangeRef.current.endIndex : chartData.length - 1}
-                                                    onChange={(brushData: any) => {
-                                                        if (brushData && typeof brushData.startIndex === 'number' && typeof brushData.endIndex === 'number') {
-                                                            brushRangeRef.current = {
-                                                                startIndex: brushData.startIndex,
-                                                                endIndex: brushData.endIndex
-                                                            };
-                                                        }
-                                                    }}
-                                                />
-                                            )}
                                             <Line type="monotone" dataKey="rtt" stroke="#3b82f6" strokeWidth={2} dot={false} name="RTT" isAnimationActive={false} connectNulls={false} />
                                             <Line type="monotone" dataKey="rttOffline" stroke="#3b82f6" strokeWidth={2} strokeDasharray="5 5" dot={false} name="RTT (Offline)" isAnimationActive={false} connectNulls={false} />
                                             <Line type="monotone" dataKey="windowMedian" stroke="#10b981" strokeWidth={1.5} dot={false} name="Window Median" isAnimationActive={false} />

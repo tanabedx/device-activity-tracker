@@ -199,6 +199,9 @@ export class RttAnalyzer {
 
     /**
      * Detect state transitions based on median changes
+     * A transition is counted when:
+     * - The median crosses the threshold in either direction
+     * - We use a smoothed approach: track when we cross from one side to another
      */
     private detectTransition(currentMedian: number): void {
         if (this.lastStableMedian === 0) {
@@ -208,14 +211,19 @@ export class RttAnalyzer {
 
         const changePercent = Math.abs(currentMedian - this.lastStableMedian) / this.lastStableMedian * 100;
 
+        // Detect significant changes (transitions)
         if (changePercent >= config.transitionThresholdPercent) {
             if (!this.transitionInProgress) {
                 this.transitionInProgress = true;
+                // Count the transition immediately when we detect a significant change
+                this.observedTransitions++;
             }
-        } else if (this.transitionInProgress) {
-            this.observedTransitions++;
-            this.lastStableMedian = currentMedian;
-            this.transitionInProgress = false;
+        } else {
+            // Once stable again, update baseline and reset flag
+            if (this.transitionInProgress) {
+                this.lastStableMedian = currentMedian;
+                this.transitionInProgress = false;
+            }
         }
     }
 

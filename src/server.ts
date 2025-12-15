@@ -11,50 +11,37 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, WASocket } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { Boom } from '@hapi/boom';
 import { WhatsAppTracker } from './tracker';
-import { config } from './config';
-import { validatePhoneNumber, createWhatsAppJid } from './utils/validation';
 
 const app = express();
-app.use(cors({ origin: config.corsOrigin }));
+app.use(cors());
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: config.corsOrigin,
+        origin: "*", // Allow all origins for dev
         methods: ["GET", "POST"]
     }
 });
 
-let sock: WASocket | null = null;
+let sock: any;
 let isWhatsAppConnected = false;
 const trackers: Map<string, WhatsAppTracker> = new Map(); // JID -> Tracker instance
-
-/**
- * Stop all active trackers - used during reconnection
- */
-function stopAllTrackers() {
-    for (const [jid, tracker] of trackers.entries()) {
-        console.log(`[CLEANUP] Stopping tracker for ${jid}`);
-        tracker.stopTracking();
-    }
-    trackers.clear();
-}
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
     sock = makeWASocket({
         auth: state,
-        logger: pino({ level: 'silent' }),
+        logger: pino({ level: 'debug' }),
         markOnlineOnConnect: true,
         printQRInTerminal: false,
     });
 
-    sock.ev.on('connection.update', async (update) => {
+    sock.ev.on('connection.update', async (update: any) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -64,27 +51,28 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             isWhatsAppConnected = false;
-            
-            // Clean up all trackers when connection closes
-            stopAllTrackers();
-            io.emit('connection-closed');
-            
             const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('connection closed, reconnecting:', shouldReconnect);
+            console.log('connection closed, reconnecting ', shouldReconnect);
             if (shouldReconnect) {
                 connectToWhatsApp();
             }
         } else if (connection === 'open') {
             isWhatsAppConnected = true;
-            console.log('WhatsApp connection opened');
+            console.log('opened connection');
             io.emit('connection-open');
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }) => {
+    sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }: any) => {
         console.log(`[SESSION] History sync - Chats: ${chats.length}, Contacts: ${contacts.length}, Messages: ${messages.length}, Latest: ${isLatest}`);
+    });
+
+    sock.ev.on('messages.update', (updates: any) => {
+        for (const update of updates) {
+            console.log(`[MSG UPDATE] JID: ${update.key.remoteJid}, ID: ${update.key.id}, Status: ${update.update.status}, FromMe: ${update.key.fromMe}`);
+        }
     });
 }
 
@@ -98,26 +86,33 @@ io.on('connection', (socket) => {
     }
 
     socket.emit('tracked-contacts', Array.from(trackers.keys()));
+    
+    // Handle explicit request for tracked contacts (for late-connecting clients)
+    socket.on('get-tracked-contacts', () => {
+        console.log('Client requested tracked contacts');
+        const trackedJids = Array.from(trackers.keys());
+        socket.emit('tracked-contacts', trackedJids);
+        
+        // Send historical data for each tracked contact
+        for (const jid of trackedJids) {
+            const tracker = trackers.get(jid);
+            if (tracker) {
+                const historicalData = tracker.getHistoricalData();
+                if (historicalData.length > 0) {
+                    console.log(`Sending ${historicalData.length} historical points for ${jid}`);
+                    socket.emit('historical-data', { jid, data: historicalData });
+                }
+            }
+        }
+    });
 
     socket.on('add-contact', async (number: string) => {
         console.log(`Request to track: ${number}`);
-        
-        // Validate phone number
-        const validation = validatePhoneNumber(number);
-        if (!validation.isValid) {
-            socket.emit('error', { message: validation.error || 'Invalid phone number' });
-            return;
-        }
-
-        const targetJid = createWhatsAppJid(validation.cleaned);
+        const cleanNumber = number.replace(/\D/g, '');
+        const targetJid = cleanNumber + '@s.whatsapp.net';
 
         if (trackers.has(targetJid)) {
             socket.emit('error', { jid: targetJid, message: 'Already tracking this contact' });
-            return;
-        }
-
-        if (!sock) {
-            socket.emit('error', { message: 'WhatsApp not connected' });
             return;
         }
 
@@ -132,7 +127,7 @@ io.on('connection', (socket) => {
                 tracker.onUpdate = (data) => {
                     io.emit('tracker-update', {
                         jid: result.jid,
-                        ...data as object
+                        ...data
                     });
                 };
 
@@ -140,11 +135,17 @@ io.on('connection', (socket) => {
 
                 const ppUrl = await tracker.getProfilePicture();
 
-                // Use phone number as the display name
-                // Note: WhatsApp contact names are not available via the onWhatsApp API
-                const contactName = validation.cleaned;
+                let contactName = cleanNumber;
+                try {
+                    const contactInfo = await sock.onWhatsApp(result.jid);
+                    if (contactInfo && contactInfo[0]?.notify) {
+                        contactName = contactInfo[0].notify;
+                    }
+                } catch (err) {
+                    console.log('[NAME] Could not fetch contact name, using number');
+                }
 
-                socket.emit('contact-added', { jid: result.jid, number: validation.cleaned });
+                socket.emit('contact-added', { jid: result.jid, number: cleanNumber });
 
                 io.emit('profile-pic', { jid: result.jid, url: ppUrl });
                 io.emit('contact-name', { jid: result.jid, name: contactName });
@@ -152,7 +153,7 @@ io.on('connection', (socket) => {
                 socket.emit('error', { jid: targetJid, message: 'Number not on WhatsApp' });
             }
         } catch (err) {
-            console.error('Error verifying contact:', err);
+            console.error(err);
             socket.emit('error', { jid: targetJid, message: 'Verification failed' });
         }
     });
@@ -168,6 +169,7 @@ io.on('connection', (socket) => {
     });
 });
 
-httpServer.listen(config.serverPort, () => {
-    console.log(`Server running on port ${config.serverPort}`);
+const PORT = 3001;
+httpServer.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
