@@ -15,9 +15,10 @@ try {
   try {
     execSync('docker info', { stdio: 'ignore' });
   } catch (e) {
-    console.error('⚠️  Docker is not running.');
-    console.error('   Please start Docker Desktop and try again.');
-    process.exit(1);
+    console.warn('⚠️  Docker is not running.');
+    console.warn('   Signal API will not be available. WhatsApp tracking will still work.');
+    console.warn('   To enable Signal, start Docker Desktop and restart the server.');
+    process.exit(0); // Exit gracefully - server can still start for WhatsApp
   }
 
   // 2. Check if container exists using 'docker inspect'
@@ -35,6 +36,7 @@ try {
   }
 } catch (error) {
   // Catch any other unexpected errors
-  console.error('❌ Failed to initialize Signal API container:', error);
-  process.exit(1);
+  console.warn('⚠️  Failed to initialize Signal API container:', error);
+  console.warn('   Signal API will not be available. WhatsApp tracking will still work.');
+  process.exit(0); // Exit gracefully - server can still start for WhatsApp
 }
