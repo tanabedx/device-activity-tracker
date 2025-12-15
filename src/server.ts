@@ -38,10 +38,15 @@ if (existsSync(clientBuildPath)) {
     app.use(express.static(clientBuildPath));
     
     // Catch all handler: send back React's index.html file for client-side routing
-    app.get('*', (req, res) => {
-        // Only serve index.html for non-Socket.IO routes
-        if (!req.path.startsWith('/socket.io')) {
-            res.sendFile(path.join(clientBuildPath, 'index.html'));
+    // Use a middleware function instead of wildcard route for Express 5 compatibility
+    app.use((req, res, next) => {
+        // Only serve index.html for GET requests that aren't Socket.IO or API routes
+        if (req.method === 'GET' && !req.path.startsWith('/socket.io')) {
+            res.sendFile(path.join(clientBuildPath, 'index.html'), (err) => {
+                if (err) next(err);
+            });
+        } else {
+            next();
         }
     });
 }
