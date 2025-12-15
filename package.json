@@ -1,6 +1,7 @@
 {
   "name": "device-activity-tracker",
   "version": "1.0.0",
+  "type": "module",
   "description": "A proof-of-concept tool demonstrating privacy vulnerabilities in messaging apps through RTT-based activity analysis",
   "main": "dist/index.js",
   "keywords": [
@@ -26,8 +27,9 @@
   "homepage": "https://github.com/gommzystudio/device-activity-tracker#readme",
   "scripts": {
     "build": "tsc",
-    "start": "npx ts-node src/index.ts",
-    "start:server": "npx ts-node src/server.ts",
+    "start": "npx tsx src/index.ts",
+    "start:server": "npm run start:signal-api && npx tsx src/server.ts",
+    "start:signal-api": "npx tsx src/scripts/init-signal.ts",
     "start:client": "cd client && npm start",
     "dev": "npm run start:server",
     "postinstall": "cd client && npm install"
@@ -39,13 +41,16 @@
     "pdf-parse": "^1.1.1",
     "pino": "^10.1.0",
     "qrcode-terminal": "^0.12.0",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/qrcode-terminal": "^0.12.2",
+    "@types/ws": "^8.18.1",
     "tailwindcss": "^3.4.18",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.2"
   },
   "private": true

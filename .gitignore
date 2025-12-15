@@ -79,3 +79,4 @@ jspm_packages/
 .cache
 .parcel-cache
 .cursor/
+package-lock.json

@@ -1,7 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import {Eye, EyeOff, Plus} from 'lucide-react';
-import { socket } from '../App';
+import {Eye, EyeOff, Plus, Trash2, Zap, MessageCircle, Settings} from 'lucide-react';
+import { socket, Platform, ConnectionState } from '../App';
 import { ContactCard } from './ContactCard';
+import { Login } from './Login';
+
+type ProbeMethod = 'delete' | 'reaction';
+
+interface DashboardProps {
+    connectionState: ConnectionState;
+}
 
 /** Activity states based on RTT magnitude */
 type ActivityState = 'Online' | 'Standby' | 'Offline' | 'Calibrating';
@@ -43,13 +50,19 @@ interface ContactInfo {
     profilePic: string | null;
     confidenceLevel: ConfidenceLevel;
     observedTransitions: number;
+    platform: Platform;
 }
 
-export function Dashboard() {
+export function Dashboard({ connectionState }: DashboardProps) {
     const [inputNumber, setInputNumber] = useState('');
+    const [selectedPlatform, setSelectedPlatform] = useState<Platform>(
+        connectionState.whatsapp ? 'whatsapp' : 'signal'
+    );
     const [contacts, setContacts] = useState<Map<string, ContactInfo>>(new Map());
     const [error, setError] = useState<string | null>(null);
     const [privacyMode, setPrivacyMode] = useState(false);
+    const [probeMethod, setProbeMethod] = useState<ProbeMethod>('delete');
+    const [showConnections, setShowConnections] = useState(false);
 
     useEffect(() => {
         function onTrackerUpdate(update: any) {
@@ -125,7 +138,7 @@ export function Dashboard() {
             });
         }
 
-        function onContactAdded(data: { jid: string, number: string }) {
+        function onContactAdded(data: { jid: string, number: string, platform?: Platform }) {
             setContacts(prev => {
                 const next = new Map(prev);
                 next.set(data.jid, {
@@ -138,7 +151,8 @@ export function Dashboard() {
                     presence: null,
                     profilePic: null,
                     confidenceLevel: 'Low',
-                    observedTransitions: 0
+                    observedTransitions: 0,
+                    platform: data.platform || 'whatsapp'
                 });
                 return next;
             });
@@ -158,12 +172,53 @@ export function Dashboard() {
             setTimeout(() => setError(null), 3000);
         }
 
+        function onProbeMethod(method: ProbeMethod) {
+            setProbeMethod(method);
+        }
+
+        function onTrackedContacts(contacts: { id: string, platform: Platform }[]) {
+            setContacts(prev => {
+                const next = new Map(prev);
+                contacts.forEach(({ id, platform }) => {
+                    if (!next.has(id)) {
+                        // Extract display number from id
+                        let displayNumber = id;
+                        if (platform === 'signal') {
+                            displayNumber = id.replace('signal:', '');
+                        } else {
+                            // WhatsApp JID format: number@s.whatsapp.net
+                            displayNumber = id.split('@')[0];
+                        }
+                        next.set(id, {
+                            jid: id,
+                            displayNumber,
+                            contactName: displayNumber,
+                            data: [],
+                            devices: [],
+                            deviceCount: 0,
+                            presence: null,
+                            profilePic: null,
+                            confidenceLevel: 'Low',
+                            observedTransitions: 0,
+                            platform
+                        });
+                    }
+                });
+                return next;
+            });
+        }
+
         socket.on('tracker-update', onTrackerUpdate);
         socket.on('profile-pic', onProfilePic);
         socket.on('contact-name', onContactName);
         socket.on('contact-added', onContactAdded);
         socket.on('contact-removed', onContactRemoved);
         socket.on('error', onError);
+        socket.on('probe-method', onProbeMethod);
+        socket.on('tracked-contacts', onTrackedContacts);
+
+        // Request tracked contacts after listeners are set up
+        socket.emit('get-tracked-contacts');
 
         return () => {
             socket.off('tracker-update', onTrackerUpdate);
@@ -172,16 +227,22 @@ export function Dashboard() {
             socket.off('contact-added', onContactAdded);
             socket.off('contact-removed', onContactRemoved);
             socket.off('error', onError);
+            socket.off('probe-method', onProbeMethod);
+            socket.off('tracked-contacts', onTrackedContacts);
         };
     }, []);
 
     const handleAdd = () => {
         if (!inputNumber) return;
-        socket.emit('add-contact', inputNumber);
+        socket.emit('add-contact', { number: inputNumber, platform: selectedPlatform });
     };
 
     const handleRemove = (jid: string) => {
         socket.emit('remove-contact', jid);
+    };
+
+    const handleProbeMethodChange = (method: ProbeMethod) => {
+        socket.emit('set-probe-method', method);
     };
 
     return (
@@ -189,30 +250,110 @@ export function Dashboard() {
             {/* Add Contact Form */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
                 <div className="flex justify-between items-center mb-4">
-                    <h2 className="text-xl font-semibold text-gray-900">Track Contacts</h2>
-                    <button
-                        onClick={() => setPrivacyMode(!privacyMode)}
-                        className={`px-4 py-2 rounded-lg flex items-center gap-2 font-medium transition-all duration-200 ${
-                            privacyMode 
-                                ? 'bg-green-600 text-white hover:bg-green-700 shadow-md' 
-                                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                        }`}
-                        title={privacyMode ? 'Privacy Mode: ON (Click to disable)' : 'Privacy Mode: OFF (Click to enable)'}
-                    >
-                        {privacyMode ? (
-                            <>
-                                <EyeOff size={20} />
-                                <span>Privacy ON</span>
-                            </>
-                        ) : (
-                            <>
-                                <Eye size={20} />
-                                <span>Privacy OFF</span>
-                            </>
-                        )}
-                    </button>
+                    <div className="flex items-center gap-4">
+                        <h2 className="text-xl font-semibold text-gray-900">Track Contacts</h2>
+                        {/* Manage Connections button */}
+                        <button
+                            onClick={() => setShowConnections(!showConnections)}
+                            className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors flex items-center gap-1 ${
+                                showConnections
+                                    ? 'bg-gray-700 text-white'
+                                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                            }`}
+                        >
+                            <Settings size={14} />
+                            {showConnections ? 'Hide Connections' : 'Manage Connections'}
+                        </button>
+                    </div>
+                    <div className="flex items-center gap-4">
+                        {/* Probe Method Toggle */}
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Probe Method:</span>
+                            <div className="flex rounded-lg overflow-hidden border border-gray-300">
+                                <button
+                                    onClick={() => handleProbeMethodChange('delete')}
+                                    className={`px-3 py-1.5 text-sm font-medium transition-all duration-200 flex items-center gap-1 ${
+                                        probeMethod === 'delete'
+                                            ? 'bg-purple-600 text-white'
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                                    title="Silent Delete Probe - Completely covert, target sees nothing"
+                                >
+                                    <Trash2 size={14} />
+                                    Delete
+                                </button>
+                                <button
+                                    onClick={() => handleProbeMethodChange('reaction')}
+                                    className={`px-3 py-1.5 text-sm font-medium transition-all duration-200 flex items-center gap-1 ${
+                                        probeMethod === 'reaction'
+                                            ? 'bg-yellow-500 text-white'
+                                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                                    title="Reaction Probe - Sends reactions to non-existent messages"
+                                >
+                                    <Zap size={14} />
+                                    Reaction
+                                </button>
+                            </div>
+                        </div>
+                        {/* Privacy Mode Toggle */}
+                        <button
+                            onClick={() => setPrivacyMode(!privacyMode)}
+                            className={`px-4 py-2 rounded-lg flex items-center gap-2 font-medium transition-all duration-200 ${
+                                privacyMode 
+                                    ? 'bg-green-600 text-white hover:bg-green-700 shadow-md' 
+                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                            }`}
+                            title={privacyMode ? 'Privacy Mode: ON (Click to disable)' : 'Privacy Mode: OFF (Click to enable)'}
+                        >
+                            {privacyMode ? (
+                                <>
+                                    <EyeOff size={20} />
+                                    <span>Privacy ON</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Eye size={20} />
+                                    <span>Privacy OFF</span>
+                                </>
+                            )}
+                        </button>
+                    </div>
                 </div>
                 <div className="flex gap-4">
+                    {/* Platform Selector */}
+                    <div className="flex rounded-lg overflow-hidden border border-gray-300">
+                        <button
+                            onClick={() => setSelectedPlatform('whatsapp')}
+                            disabled={!connectionState.whatsapp}
+                            className={`px-4 py-2 text-sm font-medium transition-all duration-200 flex items-center gap-2 ${
+                                selectedPlatform === 'whatsapp'
+                                    ? 'bg-green-600 text-white'
+                                    : connectionState.whatsapp
+                                        ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            }`}
+                            title={connectionState.whatsapp ? 'WhatsApp' : 'WhatsApp not connected'}
+                        >
+                            <MessageCircle size={16} />
+                            WhatsApp
+                        </button>
+                        <button
+                            onClick={() => setSelectedPlatform('signal')}
+                            disabled={!connectionState.signal}
+                            className={`px-4 py-2 text-sm font-medium transition-all duration-200 flex items-center gap-2 ${
+                                selectedPlatform === 'signal'
+                                    ? 'bg-blue-600 text-white'
+                                    : connectionState.signal
+                                        ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            }`}
+                            title={connectionState.signal ? 'Signal' : 'Signal not connected'}
+                        >
+                            <MessageCircle size={16} />
+                            Signal
+                        </button>
+                    </div>
                     <input
                         type="text"
                         placeholder="Enter phone number (e.g. 491701234567)"
@@ -230,6 +371,11 @@ export function Dashboard() {
                 </div>
                 {error && <p className="mt-2 text-red-500 text-sm">{error}</p>}
             </div>
+
+            {/* Connections Panel */}
+            {showConnections && (
+                <Login connectionState={connectionState} />
+            )}
 
             {/* Contact Cards */}
             {contacts.size === 0 ? (
@@ -253,6 +399,7 @@ export function Dashboard() {
                             privacyMode={privacyMode}
                             confidenceLevel={contact.confidenceLevel}
                             observedTransitions={contact.observedTransitions}
+                            platform={contact.platform}
                         />
                     ))}
                 </div>

@@ -1,5 +1,5 @@
 <h1 align="center">Device Activity Tracker</h1>
-<p align="center">WhatsApp Activity Tracker via RTT Analysis</p>
+<p align="center">WhatsApp & Signal Activity Tracker via RTT Analysis</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Node.js-20+-339933?style=flat&logo=node.js&logoColor=white" alt="Node.js"/>
@@ -56,7 +56,7 @@ npm run start:client
 
 Open `http://localhost:3000`, scan QR code with WhatsApp, then enter phone number to track (e.g., `491701234567`).
 
-### CLI Interface
+### CLI Interface (only WhatsApp)
 
 ```bash
 npm start
@@ -64,9 +64,35 @@ npm start
 
 Follow prompts to authenticate and enter target number.
 
+**Example Output:**
+
+```
+╔════════════════════════════════════════════════════════════════╗
+║ 🟡 Device Status Update - 09:41:51                             ║
+╠════════════════════════════════════════════════════════════════╣
+║ JID:        ***********@lid                                    ║
+║ Status:     Standby                                            ║
+║ RTT:        1104ms                                             ║
+║ Avg (3):    1161ms                                             ║
+║ Median:     1195ms                                             ║
+║ Threshold:  1075ms                                             ║
+╚════════════════════════════════════════════════════════════════╝
+```
+
+- **🟢 Online**: Device is actively being used (RTT below threshold)
+- **🟡 Standby**: Device is idle/locked (RTT above threshold)
+- **🔴 Offline**: Device is offline or unreachable (no CLIENT ACK received)
+
 ## How It Works
 
-The tracker sends reaction messages to non-existent message IDs, which triggers no notifications at the target. The time between sending the probe message and receiving the CLIENT ACK (Status 3) is measured as RTT.
+The tracker sends probe messages and measures the Round-Trip Time (RTT) to detect device activity. The time between sending the probe message and receiving the CLIENT ACK (Status 3) is measured as RTT.
+
+### Probe Methods
+
+| Method | Description                                                                                                     |
+|--------|-----------------------------------------------------------------------------------------------------------------|
+| **Delete** (Default) | Sends a "delete" request for a non-existent message ID. Completely silent/covert method.                    |
+| **Reaction** | Sends a reaction emoji to a non-existent message ID. |
 
 ### Statistical Analysis Model
 
@@ -127,21 +153,36 @@ The frontend applies **conservative outlier filtering** to prevent Y-axis skewin
 
 This ensures only truly extreme random spikes are filtered, not legitimate network events.
 
+### Switching Probe Methods
+
+In the web interface, you can switch between probe methods using the dropdown in the control panel. In CLI mode, the delete method is used by default.
+
+## Common Issues
+
+- **Not Connecting to WhatsApp**: Delete the `auth_info_baileys/` folder and re-scan the QR code.
+
 ## Project Structure
 
 ```
 device-activity-tracker/
 ├── src/
-│   ├── tracker.ts      # Core RTT analysis logic
-│   ├── server.ts       # Backend API server
-│   └── index.ts        # CLI interface
-├── client/             # React web interface
+│   ├── tracker.ts         # WhatsApp RTT analysis logic
+│   ├── signal-tracker.ts  # Signal RTT analysis logic
+│   ├── server.ts          # Backend API server (both platforms)
+│   └── index.ts           # CLI interface
+├── client/                # React web interface
 └── package.json
 ```
 
 ## How to Protect Yourself
 
-The most effective protection is to enable "My Contacts" in WhatsApp under Settings → Privacy → Advanced. This prevents unknown numbers from sending you messages (including silent reactions). Disabling read receipts helps with regular messages but does not protect against this specific attack. As of December 2025, this vulnerability remains exploitable in WhatsApp and Signal.
+The most effective mitigation is to enable “Block unknown account messages” in WhatsApp under
+Settings → Privacy → Advanced.
+
+This setting may reduce an attacker’s ability to spam probe reactions from unknown numbers, because WhatsApp blocks high-volume messages from unknown accounts.
+However, WhatsApp does not disclose what “high volume” means, so this does not fully prevent an attacker from sending a significant number of probe reactions before rate-limiting kicks in.
+
+Disabling read receipts helps with regular messages but does not protect against this specific attack. As of December 2025, this vulnerability remains exploitable in WhatsApp and Signal.
 
 ## Ethical & Legal Considerations
 
