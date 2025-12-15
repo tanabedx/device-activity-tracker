@@ -71,8 +71,8 @@ const defaultConfig: Config = {
     // Confidence system - uses fixed threshold until transitions are observed
     mediumConfidenceTransitions: 2,     // Need 2 transitions for medium confidence (minimum)
     highConfidenceTransitions: 4,       // Need 4 transitions for high confidence (clear pattern)
-    transitionThresholdPercent: 40,     // Median change >= 40% = transition
-    fixedMagnitudeThreshold: 1000,      // RTT >= 1000ms = Standby (low confidence)
+    transitionThresholdPercent: 25,     // Median change >= 25% = transition (more sensitive)
+    fixedMagnitudeThreshold: 800,       // RTT >= 800ms = Standby (low confidence)
     // Server settings
     serverPort: 3001,
     corsOrigin: process.env.CORS_ORIGIN || "*",

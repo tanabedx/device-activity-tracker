@@ -11,7 +11,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, WASocket } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { Boom } from '@hapi/boom';
 import { WhatsAppTracker, ProbeMethod } from './tracker.js';
@@ -23,17 +23,17 @@ import { validatePhoneNumber, createWhatsAppJid } from './utils/validation.js';
 const SIGNAL_API_URL = process.env.SIGNAL_API_URL || 'http://localhost:8080';
 
 const app = express();
-app.use(cors({ origin: config.corsOrigin }));
+app.use(cors());
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: config.corsOrigin,
+        origin: "*", // Allow all origins for dev
         methods: ["GET", "POST"]
     }
 });
 
-let sock: WASocket | null = null;
+let sock: any;
 let isWhatsAppConnected = false;
 let isSignalConnected = false;
 let signalAccountNumber: string | null = null;
@@ -66,12 +66,12 @@ async function connectToWhatsApp() {
 
     sock = makeWASocket({
         auth: state,
-        logger: pino({ level: 'silent' }),
+        logger: pino({ level: 'debug' }),
         markOnlineOnConnect: true,
         printQRInTerminal: false,
     });
 
-    sock.ev.on('connection.update', async (update) => {
+    sock.ev.on('connection.update', async (update: any) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -89,7 +89,7 @@ async function connectToWhatsApp() {
             io.emit('connection-closed');
             
             const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('connection closed, reconnecting:', shouldReconnect);
+            console.log('connection closed, reconnecting ', shouldReconnect);
             if (shouldReconnect) {
                 connectToWhatsApp();
             }
@@ -103,8 +103,14 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }) => {
+    sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }: any) => {
         console.log(`[SESSION] History sync - Chats: ${chats.length}, Contacts: ${contacts.length}, Messages: ${messages.length}, Latest: ${isLatest}`);
+    });
+
+    sock.ev.on('messages.update', (updates: any) => {
+        for (const update of updates) {
+            console.log(`[MSG UPDATE] JID: ${update.key.remoteJid}, ID: ${update.key.id}, Status: ${update.update.status}, FromMe: ${update.key.fromMe}`);
+        }
     });
 }
 
@@ -270,14 +276,28 @@ io.on('connection', (socket) => {
         id,
         platform: entry.platform
     }));
+    socket.emit('tracked-contacts', trackedContacts);
 
-    // Handle request to get tracked contacts (for page refresh)
+    // Handle explicit request for tracked contacts (for late-connecting clients)
     socket.on('get-tracked-contacts', () => {
+        console.log('Client requested tracked contacts');
         const trackedContacts = Array.from(trackers.entries()).map(([id, entry]) => ({
             id,
             platform: entry.platform
         }));
         socket.emit('tracked-contacts', trackedContacts);
+        
+        // Send historical data for each tracked contact
+        for (const [jid, entry] of trackers.entries()) {
+            const tracker = entry.tracker;
+            if (tracker && 'getHistoricalData' in tracker) {
+                const historicalData = (tracker as WhatsAppTracker).getHistoricalData();
+                if (historicalData.length > 0) {
+                    console.log(`Sending ${historicalData.length} historical points for ${jid}`);
+                    socket.emit('historical-data', { jid, data: historicalData });
+                }
+            }
+        }
     });
 
     // Add contact - supports both WhatsApp and Signal
@@ -380,7 +400,7 @@ io.on('connection', (socket) => {
                         io.emit('tracker-update', {
                             jid: result.jid,
                             platform: 'whatsapp',
-                            ...(updateData as Record<string, unknown>)
+                            ...(updateData as unknown as Record<string, unknown>)
                         });
                     };
 
@@ -448,6 +468,7 @@ io.on('connection', (socket) => {
     });
 });
 
-httpServer.listen(config.serverPort, () => {
-    console.log(`Server running on port ${config.serverPort}`);
+const PORT = 3001;
+httpServer.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });

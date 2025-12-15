@@ -119,6 +119,37 @@ interface DeviceMetrics {
 }
 
 /**
+ * Data structure sent via onUpdate callback
+ */
+export interface TrackerUpdateData {
+    devices: Array<{
+        jid: string;
+        activityState: ActivityState;
+        networkType: NetworkType;
+        rtt: number;
+        windowMedian: number;
+        windowJitter: number;
+        rawActivityState: ActivityState;
+        rawNetworkType: NetworkType;
+        activityPending: boolean;
+        activityProgress: number;
+        networkPending: boolean;
+        networkProgress: number;
+        confidenceLevel: ConfidenceLevel;
+        observedTransitions: number;
+    }>;
+    deviceCount: number;
+    presence: string | null;
+    magnitudeThreshold: number;
+    jitterThreshold: number;
+    windowSize: number;
+    historySize: number;
+    discardedSamples: number;
+    confidenceLevel: ConfidenceLevel;
+    observedTransitions: number;
+}
+
+/**
  * WhatsAppTracker - Monitors messaging app user activity using RTT-based analysis
  *
  * This class implements a privacy research proof-of-concept that demonstrates
@@ -132,6 +163,20 @@ interface DeviceMetrics {
  * Based on research: "Careless Whisper: Exploiting Silent Delivery Receipts to Monitor Users"
  * by Gegenhuber et al., University of Vienna & SBA Research
  */
+/** Historical data point for chart display */
+export interface HistoricalDataPoint {
+    timestamp: number;
+    rtt: number;
+    windowMedian: number;
+    windowJitter: number;
+    magnitudeThreshold: number;
+    jitterThreshold: number;
+    activityState: ActivityState;
+    networkType: NetworkType;
+    confidenceLevel: ConfidenceLevel;
+    observedTransitions: number;
+}
+
 export class WhatsAppTracker {
     private sock: WASocket;
     private targetJid: string;
@@ -143,7 +188,11 @@ export class WhatsAppTracker {
     private probeTimeouts: Map<string, NodeJS.Timeout> = new Map();
     private lastPresence: string | null = null;
     private probeMethod: ProbeMethod = 'delete'; // Default to delete method
-    public onUpdate?: (data: unknown) => void;
+    public onUpdate?: (data: TrackerUpdateData) => void;
+    
+    // Store timestamped history for frontend reconnection
+    private historicalData: HistoricalDataPoint[] = [];
+    private readonly maxHistorySize = 1000; // Keep last 1000 data points
 
     // Store event listener references for cleanup
     private messagesUpdateListener: ((updates: { key: proto.IMessageKey, update: Partial<proto.IWebMessageInfo> }[]) => void) | null = null;
@@ -638,9 +687,39 @@ export class WhatsAppTracker {
             observedTransitions: this.rttAnalyzer.getObservedTransitions()
         };
 
+        // Store in historical data for reconnecting clients
+        if (devices.length > 0) {
+            const primaryDevice = devices[0];
+            const historicalPoint: HistoricalDataPoint = {
+                timestamp: Date.now(),
+                rtt: primaryDevice.rtt,
+                windowMedian: primaryDevice.windowMedian,
+                windowJitter: primaryDevice.windowJitter,
+                magnitudeThreshold,
+                jitterThreshold,
+                activityState: primaryDevice.activityState,
+                networkType: primaryDevice.networkType,
+                confidenceLevel: primaryDevice.confidenceLevel,
+                observedTransitions: primaryDevice.observedTransitions
+            };
+            this.historicalData.push(historicalPoint);
+            
+            // Trim to max size
+            if (this.historicalData.length > this.maxHistorySize) {
+                this.historicalData = this.historicalData.slice(-this.maxHistorySize);
+            }
+        }
+
         if (this.onUpdate) {
             this.onUpdate(data);
         }
+    }
+    
+    /**
+     * Get historical data for reconnecting clients
+     */
+    public getHistoricalData(): HistoricalDataPoint[] {
+        return [...this.historicalData];
     }
 
     /**

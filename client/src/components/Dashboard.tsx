@@ -176,34 +176,103 @@ export function Dashboard({ connectionState }: DashboardProps) {
             setProbeMethod(method);
         }
 
-        function onTrackedContacts(contacts: { id: string, platform: Platform }[]) {
+        // Handle restore of tracked contacts on reconnect/page reload
+        function onTrackedContacts(contacts: { id: string, platform: Platform }[] | string[]) {
+            console.log('[Dashboard] tracked-contacts event received:', contacts);
+            if (!contacts || contacts.length === 0) {
+                console.log('[Dashboard] No contacts to restore');
+                return;
+            }
+            
             setContacts(prev => {
                 const next = new Map(prev);
-                contacts.forEach(({ id, platform }) => {
-                    if (!next.has(id)) {
-                        // Extract display number from id
-                        let displayNumber = id;
-                        if (platform === 'signal') {
-                            displayNumber = id.replace('signal:', '');
-                        } else {
-                            // WhatsApp JID format: number@s.whatsapp.net
-                            displayNumber = id.split('@')[0];
+                
+                // Handle both formats: array of objects with platform, or array of JIDs
+                const isObjectFormat = contacts.length > 0 && typeof contacts[0] === 'object' && 'id' in contacts[0];
+                
+                if (isObjectFormat) {
+                    // HEAD format: { id: string, platform: Platform }[]
+                    (contacts as { id: string, platform: Platform }[]).forEach(({ id, platform }) => {
+                        if (!next.has(id)) {
+                            // Extract display number from id
+                            let displayNumber = id;
+                            if (platform === 'signal') {
+                                displayNumber = id.replace('signal:', '');
+                            } else {
+                                // WhatsApp JID format: number@s.whatsapp.net
+                                displayNumber = id.split('@')[0];
+                            }
+                            console.log('[Dashboard] Restoring contact:', id, displayNumber, platform);
+                            next.set(id, {
+                                jid: id,
+                                displayNumber,
+                                contactName: displayNumber,
+                                data: [],
+                                devices: [],
+                                deviceCount: 0,
+                                presence: null,
+                                profilePic: null,
+                                confidenceLevel: 'Low',
+                                observedTransitions: 0,
+                                platform
+                            });
                         }
-                        next.set(id, {
-                            jid: id,
-                            displayNumber,
-                            contactName: displayNumber,
-                            data: [],
-                            devices: [],
-                            deviceCount: 0,
-                            presence: null,
-                            profilePic: null,
-                            confidenceLevel: 'Low',
-                            observedTransitions: 0,
-                            platform
-                        });
+                    });
+                } else {
+                    // frontend-improvements format: string[]
+                    for (const jid of contacts as string[]) {
+                        if (!next.has(jid)) {
+                            // Extract phone number from JID
+                            let displayNumber = jid;
+                            let platform: Platform = 'whatsapp';
+                            if (jid.startsWith('signal:')) {
+                                displayNumber = jid.replace('signal:', '');
+                                platform = 'signal';
+                            } else {
+                                displayNumber = jid.replace('@s.whatsapp.net', '');
+                            }
+                            console.log('[Dashboard] Restoring contact:', jid, displayNumber);
+                            next.set(jid, {
+                                jid,
+                                displayNumber,
+                                contactName: displayNumber,
+                                data: [],
+                                devices: [],
+                                deviceCount: 0,
+                                presence: null,
+                                profilePic: null,
+                                confidenceLevel: 'Low',
+                                observedTransitions: 0,
+                                platform
+                            });
+                        }
                     }
-                });
+                }
+                return next;
+            });
+        }
+
+        // Log socket connection status
+        console.log('[Dashboard] Setting up socket listeners, socket connected:', socket.connected);
+        
+        socket.on('connect', () => {
+            console.log('[Dashboard] Socket connected, requesting tracked contacts');
+            socket.emit('get-tracked-contacts');
+        });
+
+        // Handle historical data for reconnecting clients
+        function onHistoricalData(payload: { jid: string, data: TrackerData[] }) {
+            console.log('[Dashboard] Received historical data for', payload.jid, ':', payload.data.length, 'points');
+            setContacts(prev => {
+                const next = new Map(prev);
+                const contact = next.get(payload.jid);
+                if (contact) {
+                    // Merge historical data (avoid duplicates by timestamp)
+                    const existingTimestamps = new Set(contact.data.map(d => d.timestamp));
+                    const newData = payload.data.filter(d => !existingTimestamps.has(d.timestamp));
+                    const mergedData = [...newData, ...contact.data].sort((a, b) => a.timestamp - b.timestamp);
+                    next.set(payload.jid, { ...contact, data: mergedData });
+                }
                 return next;
             });
         }
@@ -216,11 +285,16 @@ export function Dashboard({ connectionState }: DashboardProps) {
         socket.on('error', onError);
         socket.on('probe-method', onProbeMethod);
         socket.on('tracked-contacts', onTrackedContacts);
-
-        // Request tracked contacts after listeners are set up
-        socket.emit('get-tracked-contacts');
+        socket.on('historical-data', onHistoricalData);
+        
+        // If already connected, request tracked contacts immediately
+        if (socket.connected) {
+            console.log('[Dashboard] Already connected, requesting tracked contacts');
+            socket.emit('get-tracked-contacts');
+        }
 
         return () => {
+            socket.off('connect');
             socket.off('tracker-update', onTrackerUpdate);
             socket.off('profile-pic', onProfilePic);
             socket.off('contact-name', onContactName);
@@ -229,6 +303,7 @@ export function Dashboard({ connectionState }: DashboardProps) {
             socket.off('error', onError);
             socket.off('probe-method', onProbeMethod);
             socket.off('tracked-contacts', onTrackedContacts);
+            socket.off('historical-data', onHistoricalData);
         };
     }, []);
 
