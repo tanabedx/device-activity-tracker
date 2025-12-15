@@ -11,6 +11,9 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { pino } from 'pino';
 import { Boom } from '@hapi/boom';
@@ -22,8 +25,26 @@ import { validatePhoneNumber, createWhatsAppJid } from './utils/validation.js';
 // Configuration
 const SIGNAL_API_URL = process.env.SIGNAL_API_URL || 'http://localhost:8080';
 
+// Get directory paths for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 app.use(cors());
+
+// Serve static files from React app build directory (for production)
+const clientBuildPath = path.join(__dirname, '..', 'client', 'build');
+if (existsSync(clientBuildPath)) {
+    app.use(express.static(clientBuildPath));
+    
+    // Catch all handler: send back React's index.html file for client-side routing
+    app.get('*', (req, res) => {
+        // Only serve index.html for non-Socket.IO routes
+        if (!req.path.startsWith('/socket.io')) {
+            res.sendFile(path.join(clientBuildPath, 'index.html'));
+        }
+    });
+}
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {

@@ -73,11 +73,6 @@ export function ContactCard({
     const primaryDevice = devices.length > 0 ? devices[0] : null;
     const currentActivityState: ActivityState = primaryDevice?.activityState || 'Calibrating';
     const currentNetworkType: NetworkType = primaryDevice?.networkType || 'Unknown';
-    
-    // Combined status string for display
-    const currentStatus = currentActivityState === 'Calibrating' 
-        ? 'Calibrating...'
-        : `${currentActivityState} / ${currentNetworkType}`;
 
     // Blur phone number in privacy mode
     const blurredNumber = privacyMode ? displayNumber.replace(/\d/g, '•') : displayNumber;

@@ -29,9 +29,11 @@
     "build": "tsc",
     "start": "npx tsx src/index.ts",
     "start:server": "npm run start:signal-api && npx tsx src/server.ts",
+    "start:server:only": "npx tsx src/server.ts",
     "start:signal-api": "npx tsx src/scripts/init-signal.ts",
     "start:client": "cd client && npm start",
-    "dev": "npm run start:server",
+    "dev": "npm run start:signal-api && concurrently \"npm run start:server:only\" \"npm run start:client\" --names \"backend,frontend\" --prefix-colors \"blue,green\"",
+    "start:all": "npm run build && cd client && npm run build && cd .. && npm run start:signal-api && npm run start:server:only",
     "postinstall": "cd client && npm install"
   },
   "dependencies": {
@@ -49,6 +51,7 @@
     "@types/express": "^5.0.6",
     "@types/qrcode-terminal": "^0.12.2",
     "@types/ws": "^8.18.1",
+    "concurrently": "^9.2.1",
     "tailwindcss": "^3.4.18",
     "tsx": "^4.21.0",
     "typescript": "^5.7.2"
